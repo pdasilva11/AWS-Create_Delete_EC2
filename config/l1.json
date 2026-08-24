@@ -1,0 +1,38 @@
+
+{
+  "team": "l1",
+  "teamDisplayName": "DevOps L1",
+  "aws": {
+    "region": "us-east-1",
+    "amiId": "ami-075d73f700ef0e7b3",
+    "instanceType": "t3.micro"
+  },
+  "passwordSafe": {
+    "workgroupName": "WG-DevOps-L1",
+    "smartRuleSystems": "SR-L1-Systems",
+    "smartRuleAccounts": "SR-L1-Accounts",
+    "consumerGroup": "GRP-DevOps-L1",
+    "localAccountName": "ec2-svc",
+    "functionalAccountName": "ps-rotator",
+    "platformName": "Linux",
+    "port": 22,
+    "timeout": 30,
+    "elevationCommand": "sudo",
+    "sshKeyEnforcementMode": 0,
+    "releaseDuration": 120,
+    "maxReleaseDuration": 525600,
+    "isaReleaseDuration": 120,
+    "maxConcurrentRequests": 1,
+    "changeFrequencyType": "first",
+    "changeTime": "23:30",
+    "checkPassword": false,
+    "resetOnMismatch": false,
+    "changePasswordAfterRelease": true,
+    "passwordRuleId": 0
+  },
+  "tags": {
+    "Owner": "DevOpsL1",
+    "Lifecycle": "ephemeral",
+    "ManagedBy": "ps-ephemeral-ec2"
+  }
+}
