@@ -1,0 +1,4 @@
+# Drop one JSON manifest per environment here. See teams/l1/envs/build-1042.json.
+# Adding a file creates the environment. Deleting it destroys the environment
+# AND deregisters the managed account from Password Safe.
+ 
