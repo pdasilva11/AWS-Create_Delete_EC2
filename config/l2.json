@@ -1,20 +1,37 @@
-version: 0.2
- 
-phases:
-  install:
-    runtime-versions:
-      python: 3.12
-  pre_build:
-    commands:
-      - python -m pip install --quiet cfn-lint
-      - cfn-lint infra/*.yaml
-      - python -c "import json,glob,sys; [json.load(open(f)) for f in glob.glob('config/*.json')+glob.glob('teams/*/envs/*.json')]"
-  build:
-    commands:
-      # Converge deployed stacks with the manifests declared in Git.
-      - python scripts/reconcile.py --team "$TEAM"
- 
-artifacts:
-  files:
-    - infra/**/*
-    - teams/**/*
+{
+  "team": "l2",
+  "teamDisplayName": "DevOps L2",
+  "aws": {
+    "region": "us-east-1",
+    "amiId": "ami-075d73f700ef0e7b3",
+    "instanceType": "t3.micro"
+  },
+  "passwordSafe": {
+    "workgroupName": "WG-DevOps-L2",
+    "smartRuleSystems": "SR-L2-Systems",
+    "smartRuleAccounts": "SR-L2-Accounts",
+    "consumerGroup": "GRP-DevOps-L2",
+    "localAccountName": "ec2-svc",
+    "functionalAccountName": "ps-rotator",
+    "platformName": "Linux",
+    "port": 22,
+    "timeout": 30,
+    "elevationCommand": "sudo",
+    "sshKeyEnforcementMode": 0,
+    "releaseDuration": 120,
+    "maxReleaseDuration": 525600,
+    "isaReleaseDuration": 120,
+    "maxConcurrentRequests": 1,
+    "changeFrequencyType": "first",
+    "changeTime": "23:30",
+    "checkPassword": false,
+    "resetOnMismatch": false,
+    "changePasswordAfterRelease": true,
+    "passwordRuleId": 0
+  },
+  "tags": {
+    "Owner": "DevOpsL2",
+    "Lifecycle": "ephemeral",
+    "ManagedBy": "ps-ephemeral-ec2"
+  }
+}
