@@ -1,0 +1,6 @@
+{
+  "envName": "build-1042",
+  "instanceType": "t3.micro",
+  "purpose": "example environment - delete this file to tear it down",
+  "requestedBy": "pdasilva@beyondtrust.com"
+}
