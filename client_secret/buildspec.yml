@@ -1,0 +1,20 @@
+version: 0.2
+ 
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+  pre_build:
+    commands:
+      - python -m pip install --quiet cfn-lint
+      - cfn-lint infra/*.yaml
+      - python -c "import json,glob,sys; [json.load(open(f)) for f in glob.glob('config/*.json')+glob.glob('teams/*/envs/*.json')]"
+  build:
+    commands:
+      # Converge deployed stacks with the manifests declared in Git.
+      - python scripts/reconcile.py --team "$TEAM"
+ 
+artifacts:
+  files:
+    - infra/**/*
+    - teams/**/*
