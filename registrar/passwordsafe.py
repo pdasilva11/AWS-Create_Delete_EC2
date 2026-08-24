@@ -45,6 +45,10 @@ class NotFound(PasswordSafeError):
     """404 from the API. Treated as success on the delete path."""
 
 
+class Conflict(PasswordSafeError):
+    """409. On create-if-absent paths this means "already there" -- i.e. success."""
+
+
 class PasswordSafeClient:
     def __init__(self, base_url, client_id, client_secret, verify_tls=True, timeout=30):
         # e.g. https://pf65f41b.ps.beyondtrustcloud.com/BeyondTrust/api/public/v3
@@ -121,6 +125,8 @@ class PasswordSafeClient:
 
         if status == 404:
             raise NotFound(method, path, status, payload)
+        if status == 409:
+            raise Conflict(method, path, status, payload)
         if status not in ok:
             raise PasswordSafeError(method, path, status, payload)
 
@@ -134,8 +140,44 @@ class PasswordSafeClient:
     # ------------------------------------------------------------------ #
     # session
     # ------------------------------------------------------------------ #
+    # RFC 6749 error codes, with what each actually means for Password Safe.
+    OAUTH_HINTS = {
+        "invalid_client":
+            "client_id or client_secret is wrong, OR the user is not user type "
+            "'Application', OR its API Registration is not the OAuth type. "
+            "An API Key registration will not work here.",
+        "unauthorized_client":
+            "the application user exists but is not authorised for the "
+            "client-credentials grant. Check the API Registration type.",
+        "invalid_grant":
+            "the grant was rejected. Usually the secret has expired -- "
+            "regenerate it (Users > the app user > Generate OAuth secret).",
+        "unsupported_grant_type":
+            "the tenant did not accept grant_type=client_credentials.",
+        "invalid_request":
+            "malformed request -- typically an empty client_id or secret, "
+            "which happens when the environment variable did not get set.",
+        "invalid_scope":
+            "scope rejected; not normally used by Password Safe.",
+    }
+
     def sign_in(self):
         """OAuth client-credentials token, then SignAppin to open the session."""
+        # Copy-pasting a secret into `export` very often carries a trailing
+        # newline or space. The server then rejects a credential that looks
+        # perfectly correct on screen, so say so explicitly.
+        for label, value in (("client_id", self._client_id),
+                             ("client_secret", self._client_secret)):
+            if value != value.strip():
+                log.warning("%s has leading/trailing whitespace -- stripping. "
+                            "Check how it was exported.", label)
+        self._client_id = self._client_id.strip()
+        self._client_secret = self._client_secret.strip()
+
+        if not self._client_id or not self._client_secret:
+            raise PasswordSafeError("POST", "/Auth/connect/token", 0,
+                                    "client_id or client_secret is empty")
+
         status, payload = self._raw(
             "POST",
             f"{self.base}/Auth/connect/token",
@@ -147,9 +189,29 @@ class PasswordSafeClient:
             form=True,
         )
         if status != 200:
-            # Never echo the payload verbatim -- it can contain the secret.
-            raise PasswordSafeError("POST", "/Auth/connect/token", status,
-                                    "token request rejected")
+            # The RESPONSE never contains the secret -- only the request does --
+            # so the OAuth error code is safe to surface, and it is the single
+            # most useful piece of information when this fails.
+            code = desc = None
+            try:
+                body = json.loads(payload)
+                code = body.get("error")
+                desc = body.get("error_description")
+            except (ValueError, AttributeError):
+                pass
+
+            detail = f"OAuth error {code!r}" if code else "no OAuth error code returned"
+            if desc:
+                detail += f": {desc}"
+            hint = self.OAUTH_HINTS.get(code)
+            if hint:
+                detail += f"\n       -> {hint}"
+            detail += (f"\n       (client_id used: {self._client_id[:4]}..."
+                       f"{self._client_id[-4:]}, {len(self._client_secret)} "
+                       f"char secret)")
+
+            raise PasswordSafeError("POST", "/Auth/connect/token", status, detail)
+
         self._token = json.loads(payload)["access_token"]
 
         user = self.call("POST", "/Auth/SignAppin")
@@ -179,12 +241,20 @@ class PasswordSafeClient:
     def get_workgroup(self, name):
         return self.call("GET", f"/Workgroups/{urllib.parse.quote(name)}")
 
-    def get_platform_id(self, platform_name):
+    def get_platform(self, platform_name):
+        """
+        Return the whole platform object, not just the ID. Its capability
+        flags (DSSFlag, SupportsElevationFlag, RequiresSecret ...) decide
+        which credential fields a functional account is even allowed to carry.
+        """
         for p in self.call("GET", "/Platforms") or []:
             if p.get("Name", "").lower() == platform_name.lower():
-                return p["PlatformID"]
+                return p
         raise PasswordSafeError("GET", "/Platforms", 200,
                                 f"no platform named {platform_name!r}")
+
+    def get_platform_id(self, platform_name):
+        return self.get_platform(platform_name)["PlatformID"]
 
     def get_functional_account_id(self, account_name, platform_id=None):
         """
@@ -204,12 +274,83 @@ class PasswordSafeClient:
                 continue
             return a["FunctionalAccountID"]
         known = sorted({a.get("AccountName", "?") for a in candidates})
-        raise PasswordSafeError(
-            "GET", "/FunctionalAccounts", 200,
+        raise NotFound(
+            "GET", "/FunctionalAccounts", 404,
             f"no functional account named {account_name!r}. Available: {known}. "
-            f"Create one in BeyondInsight (Configuration > Privileged Access "
-            f"Management > Functional Accounts) with credentials that exist on "
-            f"the AMI -- see docs/RUNBOOK.md section 1b.")
+            f"Run scripts/bootstrap-functional-account.py to create it, or see "
+            f"docs/RUNBOOK.md section 1b.")
+
+    def ensure_functional_account(self, platform, account_name,
+                                  private_key=None, passphrase=None,
+                                  password=None, secret=None,
+                                  elevation_command="sudo",
+                                  display_name=None, description=None):
+        """
+        POST /FunctionalAccounts -- get-or-create, idempotent.
+
+        Requires: Password Safe Account Management (Full control) OR
+                  Password Safe Configuration Management (Full control).
+
+        There is exactly ONE functional account object for the whole fleet;
+        every managed system points at it via FunctionalAccountID. So this
+        must never create a second one, and three things conspire to prevent
+        that: we look first, we let a 409 mean "someone beat us to it", and we
+        re-read after a conflict rather than trusting our own write.
+
+        Credential fields are gated on the platform's capability flags. Sending
+        PrivateKey to a platform with DSSFlag=false is a 400, and sending a
+        Password to one with RequiresSecret=true is a different 400.
+        """
+        platform_id = platform["PlatformID"]
+
+        try:
+            return self.get_functional_account_id(account_name, platform_id)
+        except NotFound:
+            pass
+
+        if not (private_key or password or secret):
+            raise ValueError(
+                "ensure_functional_account needs one of private_key, password "
+                "or secret to create the account")
+
+        body = {
+            "PlatformID": platform_id,
+            "AccountName": account_name,
+            "DisplayName": display_name or account_name,
+            "Description": description or "created by ps-ephemeral-ec2 registrar",
+        }
+
+        if platform.get("RequiresSecret") and secret:
+            body["Secret"] = secret
+        elif private_key and platform.get("DSSFlag"):
+            # Preferred: the private half never leaves Password Safe, and each
+            # instance carries only the public key.
+            body["PrivateKey"] = private_key
+            if passphrase:
+                body["Passphrase"] = passphrase
+        elif password:
+            body["Password"] = password
+        else:
+            raise ValueError(
+                f"platform {platform.get('Name')!r} (DSSFlag="
+                f"{platform.get('DSSFlag')}, RequiresSecret="
+                f"{platform.get('RequiresSecret')}) cannot accept the "
+                f"credential type supplied")
+
+        if elevation_command and platform.get("SupportsElevationFlag"):
+            body["ElevationCommand"] = elevation_command
+
+        try:
+            created = self.call("POST", "/FunctionalAccounts", data=body)
+            log.info("created functional account %s (id=%s)", account_name,
+                     created.get("FunctionalAccountID"))
+            return created["FunctionalAccountID"]
+        except Conflict:
+            # Another concurrent stack created it between our look and our
+            # write. Re-read rather than assuming which of us won.
+            log.info("functional account %s already exists (409) -- re-reading",
+                     account_name)
+            return self.get_functional_account_id(account_name, platform_id)
 
     def find_smart_rule(self, title):
         for r in self.call("GET", "/SmartRules") or []:
