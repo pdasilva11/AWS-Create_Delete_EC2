@@ -159,9 +159,15 @@ def main():
             raise SystemExit(f"generated {out.name} does not compile:\n{exc}")
 
         with tempfile.TemporaryDirectory() as elsewhere:
+            # capture_output=True (and the text= alias) only exist from
+            # Python 3.7. RHEL/CentOS 7's system python3 is 3.6, so use the
+            # form that has worked since Python 2: explicit PIPE handles and
+            # universal_newlines instead of text=.
             proc = subprocess.run(
                 [sys.executable, str(out), "--help"],
-                cwd=elsewhere, capture_output=True, text=True,
+                cwd=elsewhere,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                universal_newlines=True,
             )
         if proc.returncode != 0:
             raise SystemExit(
