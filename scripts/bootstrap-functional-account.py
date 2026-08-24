@@ -46,10 +46,15 @@ DEFAULT_PARAM = "/ps-ephemeral/functional-account/public-key"
 def generate_keypair(tmpdir, comment):
     """PEM, not OpenSSH format -- Password Safe rejects the latter."""
     key = pathlib.Path(tmpdir) / "functional"
+    # capture_output=True needs Python 3.7+; PIPE/PIPE is the 3.6-compatible
+    # form. This script runs on whatever's installed on the operator's box,
+    # which for RHEL/CentOS 7 is the system python3.6 -- so target that, not
+    # whatever wrote the script.
     subprocess.run(
         ["ssh-keygen", "-t", "rsa", "-b", "4096", "-m", "PEM",
          "-f", str(key), "-N", "", "-C", comment],
-        check=True, capture_output=True,
+        check=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     return key.read_text(), (key.with_suffix(".pub")).read_text().strip()
 
