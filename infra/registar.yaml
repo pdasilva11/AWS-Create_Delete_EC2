@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Registrar - shared Password Safe onboarding function. Deploy ONCE per account,
+  in the platform/security account. This stack holds the only standing
+  privilege in the design (the Password Safe Onboarder client credentials);
+  the team pipelines never get access to the secret, only permission to
+  invoke the function.
+ 
+Parameters:
+  PSBaseUrl:
+    Type: String
+    Default: https://pf65f41b.ps.beyondtrustcloud.com/BeyondTrust/api/public/v3
+    Description: Password Safe Cloud API base URL.
+ 
+  CodeS3Bucket:
+    Type: String
+    Description: Bucket holding the registrar deployment package (see scripts/package.sh).
+ 
+  CodeS3Key:
+    Type: String
+    Default: registrar/registrar.zip
+ 
+  ManagedByTag:
+    Type: String
+    Default: ps-ephemeral-ec2
+    Description: >
+      Value of the ManagedBy tag. SSM SendCommand is restricted to instances
+      carrying this tag, so the registrar cannot touch unrelated hosts.
+ 
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+ 
+Resources:
+ 
+  # The bootstrap secret. Created EMPTY on purpose - CloudFormation must never
+  # see the client secret. Populate it out-of-band, see docs/RUNBOOK.md.
+  PSOnboarderSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}/ps-onboarder'
+      Description: >
+        Password Safe OAuth client-credentials for the Onboarder application
+        user. JSON: {"client_id": "...", "client_secret": "..."}
+      SecretString: '{"client_id":"REPLACE_ME","client_secret":"REPLACE_ME"}'
+      Tags:
+        - Key: ManagedBy
+          Value: !Ref ManagedByTag
+ 
+  RegistrarLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-registrar'
+      RetentionInDays: !Ref LogRetentionDays
+ 
+  RegistrarRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: registrar
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+ 
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub '${RegistrarLogGroup.Arn}:*'
+ 
+              - Sid: ReadOnboarderSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref PSOnboarderSecret
+ 
+              # Discovery of instance readiness is account-wide (the API takes
+              # no resource ARN), but the ability to RUN anything is not.
+              - Sid: DescribeManagedInstances
+                Effect: Allow
+                Action:
+                  - ssm:DescribeInstanceInformation
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: '*'
+ 
+              - Sid: RunShellOnTaggedInstancesOnly
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/ManagedBy: !Ref ManagedByTag
+ 
+              - Sid: RunShellDocument
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
+ 
+  RegistrarFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: RegistrarLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-registrar'
+      Handler: handler.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt RegistrarRole.Arn
+      # Onboarding waits on SSM agent registration; a cold Amazon Linux box is
+      # typically online in 60-120s but a busy AZ can be slower.
+      Timeout: 600
+      MemorySize: 256
+      ReservedConcurrentExecutions: 10
+      Code:
+        S3Bucket: !Ref CodeS3Bucket
+        S3Key: !Ref CodeS3Key
+      Environment:
+        Variables:
+          PS_BASE_URL: !Ref PSBaseUrl
+          PS_SECRET_ARN: !Ref PSOnboarderSecret
+          SSM_READY_TIMEOUT: '300'
+ 
+  # Team stacks invoke the registrar cross-stack. Granting invoke to the whole
+  # account is deliberate and safe: the function only accepts CloudFormation
+  # custom-resource events and signs its result back to a CFN-issued presigned
+  # URL. Narrow this to specific CFN execution roles if you prefer.
+  RegistrarInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RegistrarFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: cloudformation.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+ 
+Outputs:
+  RegistrarFunctionArn:
+    Value: !GetAtt RegistrarFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RegistrarFunctionArn'
+  OnboarderSecretArn:
+    Value: !Ref PSOnboarderSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-OnboarderSecretArn'
+ 
