@@ -5,35 +5,118 @@ Description: >
   privilege in the design (the Password Safe Onboarder client credentials);
   the team pipelines never get access to the secret, only permission to
   invoke the function.
- 
+
 Parameters:
   PSBaseUrl:
     Type: String
     Default: https://pf65f41b.ps.beyondtrustcloud.com/BeyondTrust/api/public/v3
     Description: Password Safe Cloud API base URL.
- 
+
   CodeS3Bucket:
     Type: String
     Description: Bucket holding the registrar deployment package (see scripts/package.sh).
- 
+
   CodeS3Key:
     Type: String
     Default: registrar/registrar.zip
- 
+
   ManagedByTag:
     Type: String
     Default: ps-ephemeral-ec2
     Description: >
       Value of the ManagedBy tag. SSM SendCommand is restricted to instances
       carrying this tag, so the registrar cannot touch unrelated hosts.
- 
+
   LogRetentionDays:
     Type: Number
     Default: 90
     AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
- 
+
+  FunctionalAccountSecretId:
+    Type: String
+    Default: ps-ephemeral/functional-account
+    Description: >
+      Secrets Manager id holding the functional account's PRIVATE key, written
+      by scripts/bootstrap-functional-account.py. Lets the registrar create the
+      functional account in Password Safe if it is missing.
+
+  FunctionalAccountPubKeyParam:
+    Type: String
+    Default: /ps-ephemeral/functional-account/public-key
+    Description: SSM Parameter holding the PUBLIC key. Not a secret.
+
 Resources:
- 
+
+  # ------------------------------------------------------------------ #
+  # Permissions boundary - the ceiling on every role the team pipelines
+  # are allowed to create.
+  #
+  # Without this, "you may only touch roles named ps-eph-<team>-*" is not
+  # actually a boundary: the pipeline can create such a role, write an
+  # admin inline policy onto it with PutRolePolicy, pass it to EC2, and
+  # inherit full account access. Resource-scoping alone cannot stop that,
+  # because the role legitimately owns the resource it is escalating on.
+  #
+  # The CFN execution roles may only create roles that carry THIS boundary,
+  # and are not granted Put/DeleteRolePermissionsBoundary, so they cannot
+  # raise their own ceiling.
+  # ------------------------------------------------------------------ #
+  EphemeralRoleBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-role-boundary'
+      Description: >
+        Maximum permissions for any role created by the ps-ephemeral-ec2
+        pipelines. Ephemeral instances need SSM agent connectivity and
+        nothing else.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: SsmAgentOnly
+            Effect: Allow
+            Action:
+              - ssm:UpdateInstanceInformation
+              - ssm:ListAssociations
+              - ssm:ListInstanceAssociations
+              - ssm:PutInventory
+              - ssm:PutComplianceItems
+              - ssm:PutConfigurePackageResult
+              - ssm:UpdateAssociationStatus
+              - ssm:UpdateInstanceAssociationStatus
+              - ssm:GetDocument
+              - ssm:DescribeDocument
+              - ssm:DescribeAssociation
+              - ssmmessages:CreateControlChannel
+              - ssmmessages:CreateDataChannel
+              - ssmmessages:OpenControlChannel
+              - ssmmessages:OpenDataChannel
+              - ec2messages:AcknowledgeMessage
+              - ec2messages:DeleteMessage
+              - ec2messages:FailMessage
+              - ec2messages:GetEndpoint
+              - ec2messages:GetMessages
+              - ec2messages:SendReply
+            Resource: '*'
+
+          - Sid: OwnLogsOnly
+            Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogStreams
+            Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ssm/*'
+
+          # Belt and braces: even if something slipped past the ceiling
+          # above, an instance role can never read the vault credentials
+          # or reach IAM.
+          - Sid: NeverTheVaultOrIam
+            Effect: Deny
+            Action:
+              - secretsmanager:*
+              - iam:*
+              - sts:AssumeRole
+            Resource: '*'
+
   # The bootstrap secret. Created EMPTY on purpose - CloudFormation must never
   # see the client secret. Populate it out-of-band, see docs/RUNBOOK.md.
   PSOnboarderSecret:
@@ -47,13 +130,13 @@ Resources:
       Tags:
         - Key: ManagedBy
           Value: !Ref ManagedByTag
- 
+
   RegistrarLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-registrar'
       RetentionInDays: !Ref LogRetentionDays
- 
+
   RegistrarRole:
     Type: AWS::IAM::Role
     Properties:
@@ -68,17 +151,49 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
- 
+
               - Sid: Logs
                 Effect: Allow
                 Action: [logs:CreateLogStream, logs:PutLogEvents]
                 Resource: !Sub '${RegistrarLogGroup.Arn}:*'
- 
+
               - Sid: ReadOnboarderSecret
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Ref PSOnboarderSecret
- 
+
+              # Private key of the functional account. Read-only, and only so
+              # the registrar can create the account in Password Safe if it is
+              # absent. Nothing in AWS ever uses this key to log in anywhere.
+              - Sid: ReadFunctionalAccountPrivateKey
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${FunctionalAccountSecretId}-*'
+
+              - Sid: ReadFunctionalAccountPublicKey
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${FunctionalAccountPubKeyParam}'
+
+              # Each environment stack creates its OWN AWS::EC2::KeyPair for
+              # its managed account (infra/environment.yaml), so the ID isn't
+              # known here -- this must cover every one of them, not a single
+              # ARN. It is the private key of a MANAGED account, seeded once
+              # at onboarding and never used by this function afterwards
+              # (Password Safe takes over rotating it, DSSAutoManagementFlag).
+              - Sid: ReadPerInstanceKeyPair
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ec2/keypair/*'
+
+              - Sid: DecryptPerInstanceKeyPair
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'ssm.${AWS::Region}.amazonaws.com'
+
               # Discovery of instance readiness is account-wide (the API takes
               # no resource ARN), but the ability to RUN anything is not.
               - Sid: DescribeManagedInstances
@@ -88,7 +203,7 @@ Resources:
                   - ssm:GetCommandInvocation
                   - ssm:ListCommandInvocations
                 Resource: '*'
- 
+
               - Sid: RunShellOnTaggedInstancesOnly
                 Effect: Allow
                 Action: ssm:SendCommand
@@ -96,12 +211,12 @@ Resources:
                 Condition:
                   StringEquals:
                     ssm:resourceTag/ManagedBy: !Ref ManagedByTag
- 
+
               - Sid: RunShellDocument
                 Effect: Allow
                 Action: ssm:SendCommand
                 Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
- 
+
   RegistrarFunction:
     Type: AWS::Lambda::Function
     DependsOn: RegistrarLogGroup
@@ -122,8 +237,10 @@ Resources:
         Variables:
           PS_BASE_URL: !Ref PSBaseUrl
           PS_SECRET_ARN: !Ref PSOnboarderSecret
+          PS_FUNCTIONAL_SECRET_ARN: !Ref FunctionalAccountSecretId
+          FUNCTIONAL_PUBKEY_PARAM: !Ref FunctionalAccountPubKeyParam
           SSM_READY_TIMEOUT: '300'
- 
+
   # Team stacks invoke the registrar cross-stack. Granting invoke to the whole
   # account is deliberate and safe: the function only accepts CloudFormation
   # custom-resource events and signs its result back to a CFN-issued presigned
@@ -135,8 +252,13 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: cloudformation.amazonaws.com
       SourceAccount: !Ref AWS::AccountId
- 
+
 Outputs:
+  RoleBoundaryArn:
+    Description: Attach to every role the team pipelines create.
+    Value: !Ref EphemeralRoleBoundary
+    Export:
+      Name: !Sub '${AWS::StackName}-RoleBoundaryArn'
   RegistrarFunctionArn:
     Value: !GetAtt RegistrarFunction.Arn
     Export:
@@ -145,4 +267,3 @@ Outputs:
     Value: !Ref PSOnboarderSecret
     Export:
       Name: !Sub '${AWS::StackName}-OnboarderSecretArn'
- 
