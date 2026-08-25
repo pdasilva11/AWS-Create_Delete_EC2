@@ -35,10 +35,15 @@ BACKOFF_BASE = 1.5
 class PasswordSafeError(RuntimeError):
     """Raised for any non-2xx response that survived retries."""
 
+    # Long enough not to clip our own multi-line diagnostics. The cap exists
+    # to stop a giant HTML error page flooding a log, not to shorten guidance.
+    MAX_BODY = 2000
+
     def __init__(self, method, path, status, body):
         self.status = status
         self.body = body
-        super().__init__(f"{method} {path} -> HTTP {status}: {body[:500]}")
+        shown = body if len(body) <= self.MAX_BODY else body[:self.MAX_BODY] + " ...[truncated]"
+        super().__init__(f"{method} {path} -> HTTP {status}: {shown}")
 
 
 class NotFound(PasswordSafeError):
@@ -143,12 +148,19 @@ class PasswordSafeClient:
     # RFC 6749 error codes, with what each actually means for Password Safe.
     OAUTH_HINTS = {
         "invalid_client":
-            "client_id or client_secret is wrong, OR the user is not user type "
-            "'Application', OR its API Registration is not the OAuth type. "
-            "An API Key registration will not work here.",
+            "walk the five setup steps in order -- most failures here are the "
+            "third, not a bad secret:\n"
+            "          1. API Registration exists, type 'API Access Policy' "
+            "(an 'API Key' registration cannot do client_credentials)\n"
+            "          2. user exists with user type 'Application'\n"
+            "          3. the access policy is ASSIGNED TO THAT USER  <-- "
+            "commonly missed; id and secret look fine and still fail\n"
+            "          4. client_id / client_secret match that user\n"
+            "          5. the user is in a group with API access enabled",
         "unauthorized_client":
             "the application user exists but is not authorised for the "
-            "client-credentials grant. Check the API Registration type.",
+            "client-credentials grant. Its registration is probably the "
+            "'API Key' type rather than 'API Access Policy'.",
         "invalid_grant":
             "the grant was rejected. Usually the secret has expired -- "
             "regenerate it (Users > the app user > Generate OAuth secret).",
@@ -426,24 +438,35 @@ class PasswordSafeClient:
         return self.call("POST", f"/Workgroups/{workgroup_id}/ManagedSystems",
                          data=body)
 
-    def create_managed_account(self, managed_system_id, account_name,
-                               password, cfg, workgroup_id=None):
+    def create_managed_account(self, managed_system_id, account_name, cfg,
+                               platform=None, password=None, private_key=None,
+                               passphrase=None, workgroup_id=None):
         """
         POST /ManagedSystems/{managedSystemID}/ManagedAccounts
 
         Requires: Password Safe Account Management (Full control).
 
-        Field names below are the documented v3.3 schema exactly. Undocumented
-        keys are silently ignored by the API, which makes a typo here look like
-        a working call that quietly did nothing -- so do not invent fields.
+        Exactly one of password / private_key. Field names below are the
+        documented v3.3 schema exactly. Undocumented keys are silently
+        ignored by the API, which makes a typo here look like a working call
+        that quietly did nothing -- so do not invent fields.
 
         version=3.3 is what enables WorkgroupID on the account itself.
+
+        private_key is the SSH-key path: pass platform (from get_platform())
+        so its DSSFlag / DSSAutoManagementFlag capability can be checked
+        before the call, the same way ensure_functional_account gates
+        credential type on capability flags. AWS::EC2::KeyPair generates the
+        key material the caller hands in here; this method only ever
+        transports it, never generates it.
         """
+        if bool(password) == bool(private_key):
+            raise ValueError("create_managed_account needs exactly one of "
+                             "password or private_key")
+
         body = {
             "AccountName": account_name,
-            "Password": password,
             "Description": cfg.get("description", "ephemeral EC2 local account"),
-            "PasswordFallbackFlag": False,
             "LoginAccountFlag": False,
             # Without this the account is invisible to the API entirely, no
             # matter what the Smart Rule says.
@@ -453,7 +476,6 @@ class PasswordSafeClient:
             "ChangeTasksFlag": False,
             "RestartServicesFlag": False,
             "AutoManagementFlag": True,
-            "DSSAutoManagementFlag": False,
             "CheckPasswordFlag": cfg.get("checkPassword", False),
             "ChangePasswordAfterAnyReleaseFlag": cfg.get(
                 "changePasswordAfterRelease", True),
@@ -468,6 +490,40 @@ class PasswordSafeClient:
         }
         if workgroup_id is not None:
             body["WorkgroupID"] = workgroup_id
+
+        if private_key is not None:
+            platform = platform or {}
+            if not platform.get("DSSFlag"):
+                raise ValueError(
+                    f"platform {platform.get('Name')!r} does not accept DSS "
+                    f"keys (DSSFlag is false) -- cannot create {account_name!r} "
+                    f"as an SSH-key managed account on it")
+            if not platform.get("DSSAutoManagementFlag"):
+                # Not fatal by API rules, but silently means Password Safe
+                # will never take over rotating this key after the one we
+                # seed it here -- which defeats the point, so fail loudly
+                # rather than leave a key that quietly never rotates.
+                raise ValueError(
+                    f"platform {platform.get('Name')!r} does not support "
+                    f"DSSAutoManagementFlag -- Password Safe cannot take "
+                    f"over rotating {account_name!r} after this initial key. "
+                    f"Check GET /Platforms for this tenant, or see "
+                    f"docs/RUNBOOK.md section 1b.")
+            body["PrivateKey"] = private_key
+            if passphrase:
+                body["Passphrase"] = passphrase
+            # After this CFN-seeded key, Password Safe generates and installs
+            # every key from here on -- same division of labour as the
+            # functional account: AWS generates the very first key
+            # (AWS::EC2::KeyPair), Password Safe's own vetted rotation
+            # generates every key after that, and this codebase never
+            # generates key material itself.
+            body["DSSAutoManagementFlag"] = True
+            body["PasswordFallbackFlag"] = False
+        else:
+            body["Password"] = password
+            body["PasswordFallbackFlag"] = False
+            body["DSSAutoManagementFlag"] = False
 
         return self.call(
             "POST",
