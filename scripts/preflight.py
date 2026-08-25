@@ -154,8 +154,23 @@ def main():
         # 3. platform
         pid = None
         try:
-            pid = client.get_platform_id(ps_cfg.get("platformName", "Linux"))
+            platform = client.get_platform(ps_cfg.get("platformName", "Linux"))
+            pid = platform["PlatformID"]
             print(f"{OK} platform {ps_cfg.get('platformName')} (id={pid})")
+            # The managed account (DevOps1/DevOps2) is SSH-key based and
+            # DSSAutoManagementFlag=true is what lets Password Safe take
+            # over generating its keys after the CFN-seeded first one -
+            # create_managed_account() refuses to create it without both.
+            if platform.get("DSSFlag") and platform.get("DSSAutoManagementFlag"):
+                print(f"{OK} platform supports DSS keys with auto-management "
+                      f"- the SSH-key managed account can be created")
+            else:
+                failures += 1
+                print(f"{BAD} platform DSSFlag={platform.get('DSSFlag')} "
+                      f"DSSAutoManagementFlag={platform.get('DSSAutoManagementFlag')} "
+                      f"- the SSH-key managed account (DevOps1/DevOps2) cannot "
+                      f"be created until both are true on this platform in "
+                      f"BeyondInsight")
         except PasswordSafeError as exc:
             failures += 1
             print(f"{BAD} {exc}")
