@@ -681,7 +681,7 @@ DEFAULT_BASE = ("https://pf65f41b.ps.beyondtrustcloud.com"
 # Rewritten by scripts/build-standalone.py. Printed in the header so you can
 # always tell WHICH copy just ran -- the repo one or a standalone build that
 # may be carrying stale config.
-BUILD_KIND = "STANDALONE, built 2026-08-24 18:30"
+BUILD_KIND = "STANDALONE, built 2026-08-25 09:58"
 
 OK, BAD, WARN = "  [ok]  ", "  [FAIL]", "  [warn]"
 
@@ -837,6 +837,13 @@ def main():
             print(f"{BAD} elevationCommand must be sudo|pbrun|pmrun, got {elev!r}")
 
         # 4. smart rules
+        #
+        # GET /SmartRules appears to return only rules the CALLING identity
+        # has an assigned role on, not every rule that exists tenant-wide.
+        # A rule can be entirely real and still come back empty here if
+        # nobody has granted this group a role on it -- so "not found" from
+        # this call must NOT be read as "does not exist", or you risk
+        # creating a duplicate of something that's already there.
         for key in ("smartRuleSystems", "smartRuleAccounts"):
             title = ps_cfg[key]
             rule = client.find_smart_rule(title)
@@ -844,10 +851,18 @@ def main():
                 print(f"{OK} smart rule {title} (id={rule['SmartRuleID']})")
             else:
                 failures += 1
-                print(f"{BAD} smart rule {title!r} not found. Create it as a "
+                print(f"{BAD} smart rule {title!r} not visible to "
+                      f"{username!r}.")
+                print(f"       This means ONE of two things -- check the "
+                      f"BeyondInsight console before creating anything:")
+                print(f"         a) it does not exist yet -> create it as a "
                       f"MANAGED ACCOUNT rule, criteria Workgroup = "
-                      f"{ps_cfg['workgroupName']}, with action "
-                      f"'Manage Account Settings -> API Enabled = on'.")
+                      f"{ps_cfg['workgroupName']}, action 'Manage Account "
+                      f"Settings -> API Enabled = on'")
+                print(f"         b) it already exists but the group "
+                      f"{username!r} belongs to has no role assigned on it "
+                      f"-> open the Smart Rule's Permissions tab and add "
+                      f"that group with a role, rather than recreating it")
 
         # 5. scope sanity
         try:
@@ -857,6 +872,11 @@ def main():
             print(f"{WARN} could not list managed accounts: {exc}")
 
         # 6. write targets
+        #
+        # `need` below is OUR GUESS at the required permission, based on the
+        # documented API guide -- it is NOT the tenant's actual error text.
+        # Lead with the real message; the guess is only a fallback for when
+        # the API returns something generic.
         for path, need in (
                 ("/ManagedSystems", "Password Safe System Management (Full control)"),
                 ("/Workgroups", "AssetManagement.Read")):
@@ -865,7 +885,10 @@ def main():
                 print(f"{OK} onboarder can read {path}")
             except PasswordSafeError as exc:
                 failures += 1
-                print(f"{BAD} cannot read {path} ({exc.status}) - needs {need}")
+                print(f"{BAD} cannot read {path} ({exc.status})")
+                print(f"       tenant says: {exc}")
+                print(f"       commonly needs: {need} -- but trust the "
+                      f"tenant's own message above over this guess")
     finally:
         client.sign_out()
 
