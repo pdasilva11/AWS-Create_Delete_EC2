@@ -6,7 +6,16 @@ credentials, which are scoped by Smart Rule and can only see that team's hosts.
 
   export PS_CLIENT_ID=...        # the TEAM's client, not the onboarder's
   export PS_CLIENT_SECRET=...
-  python scripts/fetch-credential.py --account-name ec2-svc --system build-1042
+  python scripts/fetch-credential.py --account-name DevOps1 --system build-1042
+
+The managed account is SSH-key based (see docs/RUNBOOK.md section 1b), so
+what comes back here is a PRIVATE KEY, not a password -- redirect stdout to
+a file and chmod 600 it, e.g.:
+
+  python scripts/fetch-credential.py --account-name DevOps1 \\
+    --system build-1042 > /tmp/build-1042.pem
+  chmod 600 /tmp/build-1042.pem
+  ssh -i /tmp/build-1042.pem DevOps1@<private-ip>
 
 Proves the isolation: run it with L1's client against an L2 host and it should
 return nothing at all, not "access denied".
@@ -28,7 +37,9 @@ DEFAULT_BASE = ("https://pf65f41b.ps.beyondtrustcloud.com"
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--account-name", default="ec2-svc")
+    ap.add_argument("--account-name", required=True,
+                    help="e.g. DevOps1 / DevOps2 -- see config/<team>.json "
+                         "localAccountName")
     ap.add_argument("--system", required=True, help="managed system / asset name")
     ap.add_argument("--duration", type=int, default=60, help="minutes")
     ap.add_argument("--reason", default="pipeline retrieval")
@@ -66,7 +77,7 @@ def main():
                     "system": acct.get("SystemName"),
                     "account": acct.get("AccountName"),
                     "requestId": request_id,
-                    "password": secret,
+                    "secret": secret,
                 }))
             else:
                 # stdout only, never a log line
