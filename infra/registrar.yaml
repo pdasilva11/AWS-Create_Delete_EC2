@@ -65,7 +65,10 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: !Sub '${AWS::StackName}-role-boundary'
-      Description: >
+      # IAM's Description regex rejects a trailing newline, and YAML's ">"
+      # folded scalar appends exactly one -- use ">-" (strip chomping) so no
+      # newline survives into the string CloudFormation sends to the API.
+      Description: >-
         Maximum permissions for any role created by the ps-ephemeral-ec2
         pipelines. Ephemeral instances need SSM agent connectivity and
         nothing else.
