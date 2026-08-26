@@ -111,6 +111,11 @@ class PasswordSafeClient:
             else:
                 body = json.dumps(data).encode()
                 hdrs["Content-Type"] = "application/json"
+        elif method in ("POST", "PUT", "PATCH"):
+            # Some endpoints (e.g. /Credentials/Change) 415 on a body-less
+            # POST unless Content-Type is present, even though there is no
+            # body to describe. Send the header anyway rather than omit it.
+            hdrs["Content-Type"] = "application/json"
 
         req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
 
