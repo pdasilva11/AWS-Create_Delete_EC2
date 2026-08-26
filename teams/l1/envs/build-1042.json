@@ -1,1 +1,6 @@
-{ "envName": "build-1042" }
+{
+  "envName": "dev-jsmith-01",
+  "instanceType": "t3.micro",
+  "purpose": "testing the new API integration",
+  "requestedBy": "jsmith@beyondtrust.com"
+}
