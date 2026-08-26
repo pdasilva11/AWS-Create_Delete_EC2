@@ -89,6 +89,7 @@ def deploy(stack_name, manifest, team_cfg, common):
          "ParameterValue": json.dumps(team_cfg["passwordSafe"] |
                                       {"team": team_cfg["team"]})},
         {"ParameterKey": "RegistrarFunctionArn", "ParameterValue": common["registrar"]},
+        {"ParameterKey": "RoleBoundaryArn", "ParameterValue": common["boundary"]},
         {"ParameterKey": "AmiId", "ParameterValue": team_cfg["aws"]["amiId"]},
         {"ParameterKey": "InstanceType",
          "ParameterValue": manifest.get("instanceType",
@@ -168,6 +169,7 @@ def main():
     prefix = env("STACK_PREFIX", f"ps-eph-{args.team}-")
     common = {
         "registrar": env("REGISTRAR_ARN"),
+        "boundary": env("ROLE_BOUNDARY_ARN"),
         "vpc": env("VPC_ID"),
         "subnet": env("SUBNET_ID"),
         "broker_cidr": env("BROKER_CIDR", "10.0.0.0/16"),
