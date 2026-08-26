@@ -73,13 +73,23 @@ def load_ps_credentials():
 
 def load_functional_credential():
     """
-    Private half of the functional account's SSH key. Returns None if no
-    secret is configured, in which case the account must already exist.
+    Private half of the functional account's SSH key. Returns {} if no
+    secret is configured, OR if the configured secret does not exist --
+    in either case the functional account must already exist in Password
+    Safe. ensure_functional_account() looks it up by name first and only
+    needs these values on the create path, so a missing secret here is
+    only fatal if the account also turns out not to exist.
     """
     if not PS_FUNCTIONAL_SECRET_ARN:
         return {}
-    raw = secretsmanager.get_secret_value(
-        SecretId=PS_FUNCTIONAL_SECRET_ARN)["SecretString"]
+    try:
+        raw = secretsmanager.get_secret_value(
+            SecretId=PS_FUNCTIONAL_SECRET_ARN)["SecretString"]
+    except secretsmanager.exceptions.ResourceNotFoundException:
+        log.info("functional account secret %s not found -- assuming the "
+                  "functional account already exists in Password Safe",
+                  PS_FUNCTIONAL_SECRET_ARN)
+        return {}
     doc = json.loads(raw)
     return {
         "private_key": doc.get("private_key"),
