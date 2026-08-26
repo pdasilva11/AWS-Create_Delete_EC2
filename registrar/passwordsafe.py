@@ -75,7 +75,7 @@ class Conflict(PasswordSafeError):
 
 
 class PasswordSafeClient:
-    def __init__(self, base_url, client_id, client_secret, verify_tls=True, timeout=30):
+    def __init__(self, base_url, client_id, client_secret, verify_tls=True, timeout=60):
         # e.g. https://pf65f41b.ps.beyondtrustcloud.com/BeyondTrust/api/public/v3
         self.base = base_url.rstrip("/")
         self._client_id = client_id
@@ -130,12 +130,22 @@ class PasswordSafeClient:
                     time.sleep(delay)
                     continue
                 return exc.code, payload
-            except urllib.error.URLError as exc:
-                last = (0, str(exc.reason))
+            except (urllib.error.URLError, TimeoutError) as exc:
+                # A read-phase timeout (waiting on the response body) surfaces
+                # as a bare TimeoutError, not wrapped in URLError like a
+                # connect-phase failure -- without this branch it skips retry
+                # entirely and crashes the whole custom resource on one slow
+                # response. Treat it exactly like any other transient
+                # network failure.
+                reason = getattr(exc, "reason", exc)
+                last = (0, str(reason))
                 if attempt < MAX_ATTEMPTS:
-                    time.sleep(BACKOFF_BASE ** attempt)
+                    delay = BACKOFF_BASE ** attempt
+                    log.warning("%s %s -> %s, retry %d in %.1fs",
+                                method, url, reason, attempt, delay)
+                    time.sleep(delay)
                     continue
-                raise PasswordSafeError(method, url, 0, str(exc.reason))
+                raise PasswordSafeError(method, url, 0, str(reason))
         return last
 
     def call(self, method, path, data=None, ok=(200, 201, 204), extra_headers=None):
