@@ -19,7 +19,9 @@ tied to an API Registration with an API Access Policy. See docs/RUNBOOK.md.
 import http.cookiejar
 import json
 import logging
+import secrets
 import ssl
+import string
 import time
 import urllib.error
 import urllib.parse
@@ -30,6 +32,24 @@ log = logging.getLogger(__name__)
 RETRY_STATUS = {429, 500, 502, 503, 504}
 MAX_ATTEMPTS = 4
 BACKOFF_BASE = 1.5
+
+
+def _random_password(length=32):
+    """
+    Used only inside ensure_functional_account, when the platform requires a
+    Password on /FunctionalAccounts but the caller only supplied a
+    PrivateKey (the SSH-key-only bootstrap path). This value is never the
+    account's real authentication path when a DSS key is also attached --
+    it exists purely to satisfy Password Safe's schema, is generated fresh
+    each call, and is never logged, stored, or returned to the caller.
+    """
+    alphabet = string.ascii_letters + string.digits + "!@#%^*-_=+"
+    while True:
+        pwd = "".join(secrets.choice(alphabet) for _ in range(length))
+        if (any(c.islower() for c in pwd) and any(c.isupper() for c in pwd)
+                and any(c.isdigit() for c in pwd)
+                and any(c in "!@#%^*-_=+" for c in pwd)):
+            return pwd
 
 
 class PasswordSafeError(RuntimeError):
@@ -309,9 +329,23 @@ class PasswordSafeClient:
         that: we look first, we let a 409 mean "someone beat us to it", and we
         re-read after a conflict rather than trusting our own write.
 
-        Credential fields are gated on the platform's capability flags. Sending
-        PrivateKey to a platform with DSSFlag=false is a 400, and sending a
-        Password to one with RequiresSecret=true is a different 400.
+        Credential fields are NOT simple alternatives here, unlike managed
+        accounts. Per the documented schema for this endpoint specifically:
+          - Password is REQUIRED whenever Platform.RequiresSecret is false --
+            unconditionally, even if PrivateKey is also supplied.
+          - PrivateKey is OPTIONAL, on top of Password, only usable when
+            Platform.DSSFlag is true.
+          - Secret is required instead of Password when RequiresSecret is
+            true.
+        (Managed accounts, by contrast, treat Password and PrivateKey as
+        mutually exclusive alternatives -- this is a real difference between
+        the two endpoints, not a typo.)
+
+        So an SSH-key-only caller (no password supplied) still needs SOME
+        password value sent whenever RequiresSecret is false. We generate a
+        throwaway one internally rather than push that requirement onto every
+        caller -- it is never the account's real authentication path when a
+        DSS key is also attached, never logged, and never returned.
         """
         platform_id = platform["PlatformID"]
 
@@ -320,10 +354,16 @@ class PasswordSafeClient:
         except NotFound:
             pass
 
-        if not (private_key or password or secret):
+        requires_secret = bool(platform.get("RequiresSecret"))
+        if requires_secret:
+            if not secret:
+                raise ValueError(
+                    f"platform {platform.get('Name')!r} requires Secret to "
+                    f"create a functional account (RequiresSecret=true)")
+        elif not (private_key or password):
             raise ValueError(
-                "ensure_functional_account needs one of private_key, password "
-                "or secret to create the account")
+                "ensure_functional_account needs private_key and/or password "
+                "to create the account (platform does not require a Secret)")
 
         body = {
             "PlatformID": platform_id,
@@ -332,22 +372,24 @@ class PasswordSafeClient:
             "Description": description or "created by ps-ephemeral-ec2 registrar",
         }
 
-        if platform.get("RequiresSecret") and secret:
+        if requires_secret:
             body["Secret"] = secret
-        elif private_key and platform.get("DSSFlag"):
-            # Preferred: the private half never leaves Password Safe, and each
-            # instance carries only the public key.
+        else:
+            # Required on this endpoint regardless of whether a PrivateKey is
+            # also being sent -- see docstring above.
+            body["Password"] = password or _random_password()
+
+        if private_key:
+            if not platform.get("DSSFlag"):
+                raise ValueError(
+                    f"platform {platform.get('Name')!r} does not accept DSS "
+                    f"keys (DSSFlag is false) -- cannot attach a PrivateKey "
+                    f"to this functional account")
+            # The private half never leaves Password Safe, and each instance
+            # carries only the public key.
             body["PrivateKey"] = private_key
             if passphrase:
                 body["Passphrase"] = passphrase
-        elif password:
-            body["Password"] = password
-        else:
-            raise ValueError(
-                f"platform {platform.get('Name')!r} (DSSFlag="
-                f"{platform.get('DSSFlag')}, RequiresSecret="
-                f"{platform.get('RequiresSecret')}) cannot accept the "
-                f"credential type supplied")
 
         if elevation_command and platform.get("SupportsElevationFlag"):
             body["ElevationCommand"] = elevation_command
