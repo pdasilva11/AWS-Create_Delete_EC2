@@ -570,7 +570,18 @@ class PasswordSafeClient:
             "ChangeFrequencyType": cfg.get("changeFrequencyType", "first"),
             "ChangeTime": cfg.get("changeTime", "23:30"),
             "MaxConcurrentRequests": cfg.get("maxConcurrentRequests", 1),
-            "UseOwnCredentials": True,
+            # False is deliberate, not a placeholder default: True means
+            # Password Safe logs in AS this account and tries to rotate its
+            # own credential -- which fails outright for a key-only,
+            # password-locked account (see provision_local_account_with_key)
+            # and, worse, bypasses the functional account's sudo-elevation
+            # path entirely, which is the whole point of FunctionalAccountID
+            # on the managed system. Confirmed via CloudTrail-style
+            # first-hand evidence: with this True, the audit log showed
+            # "Change Managed Account Credential using self" and a bare
+            # `passwd` prompting for a "Current password" that does not
+            # exist. See docs/RUNBOOK.md section 1b.
+            "UseOwnCredentials": False,
         }
         if workgroup_id is not None:
             body["WorkgroupID"] = workgroup_id
