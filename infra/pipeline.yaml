@@ -4,52 +4,52 @@ Description: >
   once with TeamName=l2. Each gets its own role, its own artifact bucket and a
   CFN execution role that can only touch stacks tagged for that team. This is
   the IAM half of the isolation model; the Password Safe half is the Workgroup.
- 
+
 Parameters:
   TeamName:
     Type: String
     AllowedValues: [l1, l2]
- 
+
   OwnerTag:
     Type: String
     Description: DevOpsL1 or DevOpsL2. Must match config/<team>.json.
- 
+
   ConnectionArn:
     Type: String
     Description: CodeStar Connections ARN for the GitHub repo.
- 
+
   RepositoryId:
     Type: String
     Description: e.g. myorg/ps-ephemeral-ec2
- 
+
   BranchName:
     Type: String
     Default: main
- 
+
   RegistrarStackName:
     Type: String
     Default: ps-registrar
     Description: Name of the deployed registrar stack, for cross-stack import.
- 
+
   VpcId:
     Type: AWS::EC2::VPC::Id
- 
+
   SubnetId:
     Type: AWS::EC2::Subnet::Id
- 
+
   ResourceBrokerCidr:
     Type: String
     Default: 10.0.0.0/16
- 
+
   FunctionalAccountPubKeyParam:
     Type: String
     Default: /ps-ephemeral/functional-account/public-key
     Description: >
       SSM Parameter name holding the PUBLIC key of the Password Safe functional
       account. Passed through to the environment stacks.
- 
+
 Resources:
- 
+
   ArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -67,7 +67,7 @@ Resources:
           - Id: expire-artifacts
             Status: Enabled
             ExpirationInDays: 30
- 
+
   # ---------------------------------------------------------------- #
   # CloudFormation execution role - the sharp end of team isolation.
   # ---------------------------------------------------------------- #
@@ -99,50 +99,110 @@ Resources:
                   - ec2:AuthorizeSecurityGroup*
                   - ec2:RevokeSecurityGroup*
                 Resource: '*'
- 
+
+              # Encrypted: true with no CMK means the aws/ebs managed key,
+              # whose key policy delegates to IAM -- so the CALLER needs these
+              # or RunInstances fails outright. kms:ViaService keeps them
+              # usable only through EC2, never for decrypting anything else.
+              - Sid: EncryptedEbsViaEc2Only
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKeyWithoutPlaintext
+                  - kms:CreateGrant
+                  - kms:DescribeKey
+                  - kms:ReEncryptFrom
+                  - kms:ReEncryptTo
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'ec2.${AWS::Region}.amazonaws.com'
+
               # Only roles in this team's path, so l1 cannot craft a role that
               # reads l2's material.
+              #
+              # The List*/Get* actions are not optional: CloudFormation
+              # enumerates attachments before DeleteRole, so without them
+              # creation succeeds and TEARDOWN fails -- the path that runs most
+              # often on ephemeral infrastructure.
+              #
+              # iam:AttachRolePolicy is deliberately NOT here. See below.
+              # Read-only and destructive-but-not-escalating IAM. Safe
+              # without a boundary condition: none of these can widen a role.
               - Sid: ScopedIam
                 Effect: Allow
                 Action:
-                  - iam:CreateRole
                   - iam:DeleteRole
-                  - iam:PutRolePolicy
-                  - iam:DeleteRolePolicy
-                  - iam:AttachRolePolicy
-                  - iam:DetachRolePolicy
                   - iam:GetRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:DetachRolePolicy
+                  - iam:ListAttachedRolePolicies
                   - iam:CreateInstanceProfile
                   - iam:DeleteInstanceProfile
                   - iam:AddRoleToInstanceProfile
                   - iam:RemoveRoleFromInstanceProfile
                   - iam:GetInstanceProfile
-                  - iam:TagRole
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/ps-eph-${TeamName}-*'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/ps-eph-${TeamName}-*'
- 
-              - Sid: OnlySsmCoreCanBeAttached
+
+              # ESCALATION GUARD.
+              # CreateRole and PutRolePolicy CAN widen a role, so both are
+              # gated on the target carrying the permissions boundary. The
+              # pipeline may create roles all day; it cannot create one that
+              # exceeds the ceiling, and it has no Put/DeleteRolePermissions-
+              # Boundary rights with which to raise that ceiling.
+              - Sid: CreateRolesOnlyWithinBoundary
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/ps-eph-${TeamName}-*'
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary:
+                      Fn::ImportValue: !Sub '${RegistrarStackName}-RoleBoundaryArn'
+
+              # PRIVILEGE ESCALATION GUARD.
+              # Unconditioned, iam:AttachRolePolicy lets this role attach
+              # AdministratorAccess to an instance role it just created, then
+              # pass that role to EC2 -- giving any instance full account
+              # access and stepping straight out of the team boundary.
+              # environment.yaml only ever attaches AmazonSSMManagedInstanceCore,
+              # so pin it to exactly that ARN.
+              - Sid: OnlySsmCoreMayBeAttached
+                Effect: Allow
+                Action: iam:AttachRolePolicy
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/ps-eph-${TeamName}-*'
+                Condition:
+                  ArnEquals:
+                    iam:PolicyARN: !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+
+              - Sid: PassRoleToEc2Only
                 Effect: Allow
                 Action: iam:PassRole
                 Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/ps-eph-${TeamName}-*'
                 Condition:
                   StringEquals:
                     iam:PassedToService: ec2.amazonaws.com
- 
+
               - Sid: InvokeRegistrar
                 Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource:
                   Fn::ImportValue: !Sub '${RegistrarStackName}-RegistrarFunctionArn'
- 
+
               # CloudFormation resolves AWS::SSM::Parameter::Value<String>
               # using THIS role, so it needs read on the public-key parameter.
               - Sid: ReadFunctionalAccountPublicKey
                 Effect: Allow
                 Action: [ssm:GetParameter, ssm:GetParameters]
                 Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${FunctionalAccountPubKeyParam}'
- 
+
   # ---------------------------------------------------------------- #
   # Reconciler. CodePipeline's native CFN action deploys exactly one
   # stack per action, which cannot express "N environments declared in
@@ -192,7 +252,7 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: cloudformation.amazonaws.com
- 
+
   ReconcileProject:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -215,10 +275,13 @@ Resources:
           - Name: REGISTRAR_ARN
             Value:
               Fn::ImportValue: !Sub '${RegistrarStackName}-RegistrarFunctionArn'
+          - Name: ROLE_BOUNDARY_ARN
+            Value:
+              Fn::ImportValue: !Sub '${RegistrarStackName}-RoleBoundaryArn'
       Source:
         Type: CODEPIPELINE
         BuildSpec: buildspec.yml
- 
+
   PipelineRole:
     Type: AWS::IAM::Role
     Properties:
@@ -242,7 +305,7 @@ Resources:
               - Effect: Allow
                 Action: codestar-connections:UseConnection
                 Resource: !Ref ConnectionArn
- 
+
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
@@ -262,7 +325,7 @@ Resources:
                 BranchName: !Ref BranchName
                 DetectChanges: true
               OutputArtifacts: [{Name: Src}]
- 
+
         - Name: Reconcile
           Actions:
             - Name: ConvergeEnvironments
@@ -270,7 +333,7 @@ Resources:
                 {Category: Build, Owner: AWS, Provider: CodeBuild, Version: '1'}
               Configuration: {ProjectName: !Ref ReconcileProject}
               InputArtifacts: [{Name: Src}]
- 
+
       # Only fire when THIS team's files change. Without this, an L2 commit
       # would run L1's pipeline.
       Triggers:
@@ -284,7 +347,7 @@ Resources:
                     - !Sub 'teams/${TeamName}/**'
                     - !Sub 'config/${TeamName}.json'
                     - 'infra/**'
- 
+
 Outputs:
   PipelineName:
     Value: !Ref Pipeline
