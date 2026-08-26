@@ -421,6 +421,33 @@ class PasswordSafeClient:
                      account_name)
             return self.get_functional_account_id(account_name, platform_id)
 
+    def get_dss_key_rule_id(self, name=None):
+        """
+        GET /DSSKeyRules -- the SSH Key Policy a managed system must carry
+        for SSH Key auto-management to actually happen. Leave a managed
+        system's DSSKeyRuleID at 0/unset and Credentials/Change does not
+        error -- it silently rotates the account's PASSWORD instead of its
+        SSH key. Password Safe ships one built-in policy unless more have
+        been created, so the common case is: call with no name and take
+        the only one that comes back.
+        """
+        rules = self.call("GET", "/DSSKeyRules") or []
+        if name:
+            for r in rules:
+                if r.get("Name", "").lower() == name.lower():
+                    return r["DSSKeyRuleID"]
+            known = sorted({r.get("Name", "?") for r in rules})
+            raise PasswordSafeError("GET", "/DSSKeyRules", 200,
+                                    f"no DSS key rule named {name!r}. Available: {known}")
+        if not rules:
+            raise PasswordSafeError("GET", "/DSSKeyRules", 200,
+                                    "no DSS key rules configured on this tenant -- "
+                                    "SSH key auto-management cannot work without one")
+        if len(rules) > 1:
+            log.warning("multiple DSS key rules exist and none was named in "
+                        "config -- using the first: %s", rules[0].get("Name"))
+        return rules[0]["DSSKeyRuleID"]
+
     def find_smart_rule(self, title):
         for r in self.call("GET", "/SmartRules") or []:
             if r.get("Title", "").lower() == title.lower():

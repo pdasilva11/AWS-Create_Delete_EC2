@@ -181,7 +181,12 @@ def provision_functional_account(instance_id, username, public_key,
         f"chown {username}:{username} /home/{username}/.ssh/authorized_keys",
         f"chmod 600 /home/{username}/.ssh/authorized_keys",
         f"cat > /etc/sudoers.d/90-{username} <<'SUDO'",
-        f"{username} ALL=(root) NOPASSWD: /usr/sbin/chpasswd, /usr/bin/passwd",
+        # grep/sed/tee are BeyondTrust's own documented requirement for the
+        # functional account: SSH key auto-management removes the old public
+        # key from authorized_keys (grep/sed) and appends the new one (tee).
+        # chpasswd/passwd alone is only enough for PASSWORD rotation.
+        f"{username} ALL=(root) NOPASSWD: /usr/sbin/chpasswd, /usr/bin/passwd, "
+        f"/usr/bin/grep, /usr/bin/sed, /usr/bin/tee",
         "SUDO",
         f"chmod 440 /etc/sudoers.d/90-{username}",
         "visudo -c >/dev/null",
@@ -302,12 +307,19 @@ def on_create(props):
 
         # One call: the managed system is created directly in the Workgroup,
         # so it can never briefly exist outside the team's Smart Rule scope.
+        # A managed system with no DSSKeyRuleID does not error when asked
+        # to rotate an SSH-key account -- it just silently rotates the
+        # account's PASSWORD instead via Credentials/Change, which is
+        # useless here (the account has password auth locked, see
+        # provision_local_account_with_key) and leaves authorized_keys
+        # untouched. See docs/RUNBOOK.md section 1b.
+        dss_key_rule_id = ps.get_dss_key_rule_id(cfg.get("dssKeyRuleName"))
         system = ps.create_managed_system_in_workgroup(
             workgroup_id, platform_id, functional_account_id,
             system_name=asset_name,
             ip_address=private_ip,
             dns_name=props.get("PrivateDnsName") or asset_name,
-            cfg=cfg,
+            cfg={**cfg, "dssKeyRuleId": dss_key_rule_id},
         )
         system_id = system["ManagedSystemID"]
 
