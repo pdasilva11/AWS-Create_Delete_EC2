@@ -98,7 +98,36 @@ Resources:
                   - ec2:DeleteSecurityGroup
                   - ec2:AuthorizeSecurityGroup*
                   - ec2:RevokeSecurityGroup*
+                  # environment.yaml's per-instance AWS::EC2::KeyPair (the
+                  # managed account's SSH key -- see docs/RUNBOOK.md 1c) is
+                  # created/deleted under THIS role, not the registrar's --
+                  # CloudFormation invokes the resource handler as the
+                  # stack's own execution role.
+                  - ec2:CreateKeyPair
+                  - ec2:DeleteKeyPair
                 Resource: '*'
+
+              # AWS::EC2::KeyPair's resource handler writes the generated
+              # private key to SSM Parameter Store itself (as a SecureString
+              # at /ec2/keypair/{KeyPairId}) and deletes it again when the
+              # KeyPair is deleted -- both under this same execution role.
+              - Sid: ManageGeneratedKeyPairParameter
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                  - ssm:DeleteParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ec2/keypair/*'
+
+              - Sid: EncryptGeneratedKeyPairViaSsmOnly
+                Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'ssm.${AWS::Region}.amazonaws.com'
 
               # Encrypted: true with no CMK means the aws/ebs managed key,
               # whose key policy delegates to IAM -- so the CALLER needs these
