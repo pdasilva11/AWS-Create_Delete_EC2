@@ -1,2 +1,1 @@
-<img width="2343" height="2093" alt="architecture-iam-diagram" src="https://github.com/user-attachments/assets/dd38259d-1b79-4f3e-9efa-aa6e23c89848" />
-
+<img width="2500" height="2651" alt="architecture-iam-diagram-human" src="https://github.com/user-attachments/assets/9bc52bad-e3ee-4edb-9809-c495714c0407" />
